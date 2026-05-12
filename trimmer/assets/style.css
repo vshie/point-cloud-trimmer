@@ -1,0 +1,94 @@
+/* Dark-theme overrides for native inputs, sliders, tooltips, and buttons.
+   Dash auto-loads any .css file in this folder. */
+
+body {
+  background-color: #111;
+  color: #eee;
+}
+
+label {
+  color: #ccc;
+  margin-right: 4px;
+}
+
+input,
+input[type="text"],
+input[type="number"] {
+  background-color: #1e1e1e !important;
+  color: #f0f0f0 !important;
+  border: 1px solid #444 !important;
+  padding: 4px 6px !important;
+  border-radius: 3px !important;
+  font: inherit;
+}
+
+input:focus {
+  outline: none !important;
+  border-color: #4fc3f7 !important;
+}
+
+input::placeholder {
+  color: #777 !important;
+}
+
+button {
+  background-color: #2a2a2a;
+  color: #eee;
+  border: 1px solid #555;
+  padding: 5px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover {
+  background-color: #3a3a3a;
+  border-color: #777;
+}
+button:active {
+  background-color: #1a1a1a;
+}
+
+/* rc-slider (used by dcc.Slider and dcc.RangeSlider) */
+.rc-slider-rail {
+  background-color: #333 !important;
+}
+.rc-slider-track {
+  background-color: #4fc3f7 !important;
+}
+.rc-slider-handle {
+  background-color: #4fc3f7 !important;
+  border-color: #4fc3f7 !important;
+}
+.rc-slider-handle:hover,
+.rc-slider-handle:focus,
+.rc-slider-handle:active {
+  border-color: #81d4fa !important;
+  box-shadow: 0 0 0 4px rgba(79, 195, 247, 0.3) !important;
+}
+.rc-slider-tooltip-inner {
+  background-color: #222 !important;
+  color: #f0f0f0 !important;
+  border: 1px solid #555 !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5) !important;
+}
+.rc-slider-tooltip-arrow {
+  border-top-color: #555 !important;
+}
+
+/* Checklist labels */
+.dash-checklist label,
+.dash-radio label {
+  color: #ddd !important;
+  margin-right: 12px;
+}
+
+/* Tab styling so it reads well on the dark page */
+.tab,
+.tab-parent {
+  background-color: #111 !important;
+}
+
+/* Plotly modebar in dark themes can collide with our top bar; keep it visible */
+.modebar-btn path {
+  fill: #ddd !important;
+}
