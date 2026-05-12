@@ -7,6 +7,8 @@ cross-section on a top-down map, inspecting depth and power histograms,
 and lasso-rejecting fliers. Exports a trimmed CSV with the original 15
 columns preserved.
 
+![Point Cloud Trimmer in use: a 24.5M-point CSV with auto-filters applied, a 139.5° heading line drawn across the seabed, and the corresponding cross-section in the right pane.](docs/screenshot.png)
+
 The app is designed for the ~11M-point files the Omniscan3D produces
 today and is validated up to ~50M points. Memory is bounded and does
 not scale with the CSV's full row width because the source table is
