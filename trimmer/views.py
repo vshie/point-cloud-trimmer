@@ -434,3 +434,79 @@ def cross_section_figure(
             line_width=0,
         )
     return fig, sample_local
+
+
+def transect_3d_figure(
+    corridor_idx: np.ndarray,
+    along: np.ndarray,
+    across: np.ndarray,
+    depth: np.ndarray,
+    sample_local: np.ndarray,
+    half_width: float,
+    selected_depth_range: Optional[tuple[float, float]] = None,
+) -> go.Figure:
+    """Rotatable 3D scatter of the corridor: along / across / depth.
+
+    Uses ``aspectmode='data'`` so all three axes are scaled by their real
+    data extents -- a long, thin, shallow transect looks long, thin, and
+    shallow. The Plotly modebar lets the user orbit/pan/zoom the view.
+    """
+    if corridor_idx.size == 0 or sample_local.size == 0:
+        fig = _empty_figure("Transect 3D (empty corridor)")
+        fig.update_layout(scene=dict(bgcolor="#111"))
+        return fig
+
+    plot_along = along[sample_local]
+    plot_across = across[sample_local]
+    plot_z = depth[corridor_idx][sample_local]
+
+    if selected_depth_range is not None:
+        cmin, cmax = float(selected_depth_range[0]), float(selected_depth_range[1])
+    else:
+        finite_z = plot_z[np.isfinite(plot_z)]
+        if finite_z.size:
+            cmin = float(finite_z.min())
+            cmax = float(finite_z.max())
+        else:
+            cmin, cmax = -1.0, 0.0
+
+    fig = go.Figure(
+        go.Scatter3d(
+            x=plot_along,
+            y=plot_across,
+            z=plot_z,
+            mode="markers",
+            marker=dict(
+                size=2,
+                color=plot_z,
+                colorscale="Viridis",
+                cmin=cmin,
+                cmax=cmax,
+                showscale=True,
+                colorbar=dict(title="depth (m)", thickness=12),
+            ),
+            hovertemplate=(
+                "along=%{x:.2f} m"
+                "<br>across=%{y:.2f} m"
+                "<br>depth=%{z:.3f} m"
+                "<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        margin=dict(l=0, r=0, t=10, b=0),
+        showlegend=False,
+        scene=dict(
+            xaxis=dict(title="along (m)"),
+            yaxis=dict(
+                title="across (m)",
+                range=[-half_width, half_width],
+            ),
+            zaxis=dict(title="depth (m)"),
+            aspectmode="data",
+            bgcolor="#111",
+            camera=dict(eye=dict(x=1.4, y=-1.4, z=0.9)),
+        ),
+    )
+    return fig

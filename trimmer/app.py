@@ -87,7 +87,7 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
     return html.Div(
         style={
             "display": "grid",
-            "gridTemplateRows": "auto auto 1fr",
+            "gridTemplateRows": "auto auto auto 1fr",
             "height": "100vh",
             "fontFamily": "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
             "backgroundColor": "#111",
@@ -202,6 +202,121 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
                                 n_clicks=0,
                             ),
                         ],
+                    ),
+                ],
+            ),
+            # Finishing-filter row ---------------------------------------
+            html.Div(
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "20px",
+                    "padding": "8px 14px",
+                    "borderBottom": "1px solid #333",
+                    "backgroundColor": "#181818",
+                    "flexWrap": "wrap",
+                },
+                children=[
+                    dcc.Checklist(
+                        id="finishing-filters",
+                        options=[
+                            {
+                                "label": " Power-weighted grid median",
+                                "value": "pwg",
+                            },
+                            {
+                                "label": " kNN SOR  (slow; finishing step only)",
+                                "value": "knn",
+                            },
+                        ],
+                        value=[],
+                        inline=True,
+                        labelStyle={"marginRight": "12px"},
+                    ),
+                    html.Div(
+                        style={"display": "flex", "gap": "6px", "alignItems": "center"},
+                        title=(
+                            "Power-weighted grid: per-cell MAD using only the strongest "
+                            "returns to set the trusted median."
+                        ),
+                        children=[
+                            html.Label("PWG cell (m):"),
+                            dcc.Input(
+                                id="pwg-cell",
+                                type="number",
+                                value=1.0,
+                                step=0.25,
+                                min=0.1,
+                                style={"width": "70px"},
+                            ),
+                            html.Label("k:"),
+                            dcc.Input(
+                                id="pwg-k",
+                                type="number",
+                                value=4.0,
+                                step=0.5,
+                                min=1.0,
+                                style={"width": "60px"},
+                            ),
+                            html.Label("top %:"),
+                            dcc.Input(
+                                id="pwg-top-pct",
+                                type="number",
+                                value=50,
+                                step=5,
+                                min=5,
+                                max=100,
+                                style={"width": "70px"},
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        style={"display": "flex", "gap": "6px", "alignItems": "center"},
+                        title=(
+                            "kNN SOR: drops points whose mean distance to their k "
+                            "nearest neighbors is > mean + m * sigma."
+                        ),
+                        children=[
+                            html.Label("kNN k:"),
+                            dcc.Input(
+                                id="knn-k",
+                                type="number",
+                                value=8,
+                                step=1,
+                                min=2,
+                                style={"width": "60px"},
+                            ),
+                            html.Label("m:"),
+                            dcc.Input(
+                                id="knn-m",
+                                type="number",
+                                value=3.0,
+                                step=0.5,
+                                min=0.5,
+                                style={"width": "60px"},
+                            ),
+                        ],
+                    ),
+                    html.Button(
+                        "Apply finishing filters",
+                        id="btn-apply-finishing",
+                        n_clicks=0,
+                        title=(
+                            "Run only after trimming with the other tools \u2014 this is a "
+                            "finishing step. kNN SOR can take 1\u20133 minutes on large "
+                            "datasets and is intended to remove residual isolated fliers "
+                            "from already-cleaned data."
+                        ),
+                    ),
+                    html.Span(
+                        id="finishing-status",
+                        style={"color": "#9e9", "marginLeft": "6px", "fontSize": "12px"},
+                    ),
+                    dcc.Interval(
+                        id="filter-interval",
+                        interval=750,
+                        n_intervals=0,
+                        disabled=True,
                     ),
                 ],
             ),
@@ -430,13 +545,21 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
                                 children=html.Div(
                                     style={
                                         "display": "grid",
-                                        "gridTemplateRows": "1fr auto",
+                                        # cross-section gets a flexible top half;
+                                        # the 3D transect view gets a fixed ~280px slab;
+                                        # controls sit on their own auto row.
+                                        "gridTemplateRows": "minmax(220px, 1fr) 280px auto",
                                         "height": "100%",
-                                        "minHeight": "300px",
+                                        "minHeight": "560px",
                                     },
                                     children=[
                                         dcc.Graph(
                                             id="cross-section",
+                                            config={"displaylogo": False},
+                                            style={"height": "100%", "minHeight": "200px"},
+                                        ),
+                                        dcc.Graph(
+                                            id="transect-3d",
                                             config={"displaylogo": False},
                                             style={"height": "100%"},
                                         ),
@@ -583,6 +706,7 @@ def register_callbacks(app: Dash) -> None:
 
     @app.callback(
         Output("cross-section", "figure"),
+        Output("transect-3d", "figure"),
         Output("corridor-version", "data"),
         Input("heading-store", "data"),
         Input("half-width", "value"),
@@ -595,7 +719,11 @@ def register_callbacks(app: Dash) -> None:
         heading = _heading_from_store(heading_payload)
         if heading is None:
             ds.cross_section_sample_local = None
-            return views._empty_figure("Cross-section (draw a line on the map)"), corr_version
+            return (
+                views._empty_figure("Cross-section (draw a line on the map)"),
+                views._empty_figure("Transect 3D (draw a line on the map)"),
+                corr_version,
+            )
         hw = float(half_width or 0.5)
         idx, along_idx, across_idx = corridor(
             east=ds.east,
@@ -619,7 +747,16 @@ def register_callbacks(app: Dash) -> None:
             selected_depth_range=tuple(depth_rng) if depth_rng else None,
         )
         ds.cross_section_sample_local = sample_local
-        return fig, (corr_version or 0) + 1
+        transect_fig = views.transect_3d_figure(
+            corridor_idx=idx,
+            along=along_idx,
+            across=across_idx,
+            depth=ds.depth,
+            sample_local=sample_local,
+            half_width=hw,
+            selected_depth_range=tuple(depth_rng) if depth_rng else None,
+        )
+        return fig, transect_fig, (corr_version or 0) + 1
 
     @app.callback(
         Output("depth-hist", "figure"),
@@ -901,21 +1038,30 @@ def register_callbacks(app: Dash) -> None:
         Output("export-status", "children"),
         Output("export-interval", "disabled"),
         Output("btn-export", "disabled"),
+        Output("btn-apply-finishing", "disabled", allow_duplicate=True),
         Input("btn-export", "n_clicks"),
         prevent_initial_call=True,
     )
     def _start_export(_n):
         ds = data_module.get()
+        if ds.is_filtering():
+            return (
+                "cannot export: finishing filters are running",
+                True,
+                False,
+                True,
+            )
         if ds.is_exporting():
-            return "export already in progress", False, True
+            return "export already in progress", False, True, True
         out = ds.csv_path.with_name(ds.csv_path.stem + "_trimmed.csv")
         ds.start_export(out)
-        return f"starting export -> {out.name} ...", False, True
+        return f"starting export -> {out.name} ...", False, True, True
 
     @app.callback(
         Output("export-status", "children", allow_duplicate=True),
         Output("export-interval", "disabled", allow_duplicate=True),
         Output("btn-export", "disabled", allow_duplicate=True),
+        Output("btn-apply-finishing", "disabled", allow_duplicate=True),
         Input("export-interval", "n_intervals"),
         prevent_initial_call=True,
     )
@@ -939,7 +1085,7 @@ def register_callbacks(app: Dash) -> None:
                 f"exporting {pct:5.1f}%  scanned {rows_p:,}/{rows_t:,},  "
                 f"wrote {rows_w:,},  elapsed {_fmt_duration(elapsed)}{eta_s}"
             )
-            return msg, False, True
+            return msg, False, True, True
         if phase == "done":
             return (
                 f"wrote {int(s.get('rows_written', 0)):,} / {int(s.get('rows_total', 0)):,} "
@@ -947,14 +1093,145 @@ def register_callbacks(app: Dash) -> None:
                 f"in {_fmt_duration(float(s.get('elapsed', 0.0)))}",
                 True,
                 False,
+                False,
             )
         if phase == "error":
             return (
                 f"export failed: {s.get('error', 'unknown error')}",
                 True,
                 False,
+                False,
             )
-        return no_update, True, False
+        return no_update, True, False, False
+
+    @app.callback(
+        Output("finishing-status", "children"),
+        Output("filter-interval", "disabled"),
+        Output("btn-apply-finishing", "disabled"),
+        Output("btn-export", "disabled", allow_duplicate=True),
+        Output("last-action", "children", allow_duplicate=True),
+        Input("btn-apply-finishing", "n_clicks"),
+        State("finishing-filters", "value"),
+        State("pwg-cell", "value"),
+        State("pwg-k", "value"),
+        State("pwg-top-pct", "value"),
+        State("knn-k", "value"),
+        State("knn-m", "value"),
+        prevent_initial_call=True,
+    )
+    def _start_finishing(_n, choices, pwg_cell, pwg_k, pwg_top_pct, knn_k, knn_m):
+        ds = data_module.get()
+        if not choices:
+            return (
+                "no finishing filters selected",
+                True,
+                False,
+                False,
+                "finishing: no checkboxes selected",
+            )
+        if ds.is_exporting():
+            return (
+                "cannot run finishing filters while export is in progress",
+                True,
+                False,
+                True,
+                no_update,
+            )
+        if ds.is_filtering():
+            return (
+                "finishing filters already running",
+                False,
+                True,
+                True,
+                no_update,
+            )
+        params = {
+            "run_pwg": "pwg" in choices,
+            "run_knn": "knn" in choices,
+            "pwg_cell": float(pwg_cell or 1.0),
+            "pwg_k": float(pwg_k or 4.0),
+            "pwg_top_pct": float(pwg_top_pct or 50.0),
+            "knn_k": int(knn_k or 8),
+            "knn_m": float(knn_m or 3.0),
+            "knn_chunk": 500_000,
+        }
+        started = ds.start_finishing(params)
+        if not started:
+            return (
+                "finishing filters already running",
+                False,
+                True,
+                True,
+                no_update,
+            )
+        label = ", ".join(c for c in ("pwg", "knn") if c in choices)
+        return (
+            f"starting finishing filters [{label}] ...",
+            False,
+            True,
+            True,
+            f"finishing [{label}]: started",
+        )
+
+    @app.callback(
+        Output("finishing-status", "children", allow_duplicate=True),
+        Output("filter-interval", "disabled", allow_duplicate=True),
+        Output("btn-apply-finishing", "disabled", allow_duplicate=True),
+        Output("btn-export", "disabled", allow_duplicate=True),
+        Output("mask-version", "data", allow_duplicate=True),
+        Output("last-action", "children", allow_duplicate=True),
+        Input("filter-interval", "n_intervals"),
+        State("mask-version", "data"),
+        prevent_initial_call=True,
+    )
+    def _poll_finishing(_n, version):
+        ds = data_module.get()
+        s = ds.filter_state
+        phase = s.get("phase", "idle")
+        applied = s.get("applied") or []
+        if phase == "running":
+            stage = s.get("stage", "")
+            progress = float(s.get("progress", 0.0))
+            elapsed = float(s.get("elapsed", 0.0))
+            pct = progress * 100.0
+            if elapsed > 0.5 and progress > 0.01:
+                eta = elapsed / progress - elapsed
+                eta_s = f", ETA {_fmt_duration(eta)}"
+            else:
+                eta_s = ""
+            msg = (
+                f"finishing: {stage}  {pct:5.1f}%  "
+                f"elapsed {_fmt_duration(elapsed)}{eta_s}"
+            )
+            return msg, False, True, True, no_update, no_update
+        if phase == "done":
+            removed = int(s.get("removed", 0))
+            kept_after = int(s.get("kept_after", 0))
+            elapsed = float(s.get("elapsed", 0.0))
+            labels = ", ".join(applied) if applied else "finishing"
+            msg = (
+                f"finishing [{labels}]: removed {removed:,}, now keeping "
+                f"{kept_after:,} ({_fmt_duration(elapsed)})"
+            )
+            return (
+                f"done in {_fmt_duration(elapsed)}",
+                True,
+                False,
+                False,
+                (version or 0) + 1,
+                msg,
+            )
+        if phase == "error":
+            err = s.get("error", "unknown error")
+            return (
+                f"finishing failed: {err}",
+                True,
+                False,
+                False,
+                no_update,
+                f"finishing failed: {err}",
+            )
+        return no_update, True, False, False, no_update, no_update
 
 
 # --- entry point ----------------------------------------------------------

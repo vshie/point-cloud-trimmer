@@ -60,6 +60,10 @@ class Dataset:
     # writes are atomic per key which is good enough for UI display.
     export_state: dict
     export_lock: threading.Lock
+    # Same idea, for the slow finishing filters (kNN SOR and
+    # power-weighted grid median).
+    filter_state: dict
+    filter_lock: threading.Lock
     n: int
 
     def __init__(self, csv_path: Path) -> None:
@@ -86,6 +90,8 @@ class Dataset:
         self.cross_section_sample_local = None
         self.export_lock = threading.Lock()
         self.export_state = self._idle_export_state()
+        self.filter_lock = threading.Lock()
+        self.filter_state = self._idle_filter_state()
         self.load_seconds = time.perf_counter() - t0
 
     @staticmethod
@@ -101,8 +107,25 @@ class Dataset:
             "error": None,
         }
 
+    @staticmethod
+    def _idle_filter_state() -> dict:
+        return {
+            "phase": "idle",
+            "stage": "",
+            "progress": 0.0,
+            "elapsed": 0.0,
+            "applied": [],
+            "removed": 0,
+            "kept_before": 0,
+            "kept_after": 0,
+            "error": None,
+        }
+
     def is_exporting(self) -> bool:
         return self.export_state.get("phase") == "running"
+
+    def is_filtering(self) -> bool:
+        return self.filter_state.get("phase") == "running"
 
     def push_history(self) -> None:
         """Snapshot the current mask onto the undo stack (packed, ~1 bit/point)."""
@@ -249,6 +272,153 @@ class Dataset:
             self.export_state.update(
                 {
                     "phase": "error",
+                    "error": str(e),
+                    "elapsed": time.perf_counter() - t0,
+                }
+            )
+
+    # --- Finishing filters (kNN SOR + power-weighted grid median) ---------
+
+    def start_finishing(self, params: dict) -> bool:
+        """Kick off a finishing-filter pass on a daemon thread.
+
+        `params` is a dict with at least:
+            run_pwg: bool
+            run_knn: bool
+            pwg_cell, pwg_k, pwg_top_pct: floats
+            knn_k: int, knn_m: float, knn_chunk: int
+
+        Returns False if a finishing run is already in flight.
+        """
+        with self.filter_lock:
+            if self.is_filtering():
+                return False
+            applied: list[str] = []
+            if params.get("run_pwg"):
+                applied.append("pwg")
+            if params.get("run_knn"):
+                applied.append("knn")
+            self.filter_state = {
+                "phase": "running",
+                "stage": "starting",
+                "progress": 0.0,
+                "elapsed": 0.0,
+                "applied": applied,
+                "removed": 0,
+                "kept_before": self.kept_count,
+                "kept_after": 0,
+                "error": None,
+            }
+        t = threading.Thread(
+            target=self._run_finishing,
+            args=(dict(params),),
+            daemon=True,
+            name="omniscan-finishing",
+        )
+        t.start()
+        return True
+
+    def _run_finishing(self, params: dict) -> None:
+        """Worker that runs the selected finishing filters in sequence.
+
+        Operates on a *copy* of the current keep mask so the UI's `keep_mask`
+        view (and any concurrent reads) stay consistent until the run
+        finishes; the result is then committed via `replace_mask` (which
+        pushes the previous state to the undo stack).
+        """
+        # Local import to keep startup snappy when no finishing is run.
+        from . import filters as F
+
+        t0 = time.perf_counter()
+        try:
+            subset = self.keep_mask.copy()
+            applied_labels: list[str] = []
+
+            def make_progress_cb(stage_prefix: str, overall_lo: float, overall_hi: float):
+                def cb(stage: str, frac: float) -> None:
+                    frac = float(max(0.0, min(1.0, frac)))
+                    overall = overall_lo + (overall_hi - overall_lo) * frac
+                    self.filter_state.update(
+                        {
+                            "stage": f"{stage_prefix}: {stage}",
+                            "progress": overall,
+                            "elapsed": time.perf_counter() - t0,
+                        }
+                    )
+                return cb
+
+            run_pwg = bool(params.get("run_pwg"))
+            run_knn = bool(params.get("run_knn"))
+
+            # Allocate progress budget across whichever filters were chosen.
+            stages: list[tuple[str, tuple[float, float]]] = []
+            if run_pwg and run_knn:
+                # kNN dominates by a large margin; give it 85% of the bar.
+                stages.append(("pwg", (0.0, 0.15)))
+                stages.append(("knn", (0.15, 1.0)))
+            elif run_pwg:
+                stages.append(("pwg", (0.0, 1.0)))
+            elif run_knn:
+                stages.append(("knn", (0.0, 1.0)))
+            stage_ranges = dict(stages)
+
+            if run_pwg:
+                lo, hi = stage_ranges["pwg"]
+                self.filter_state.update({"stage": "power-weighted grid", "progress": lo})
+                mask_pwg = F.power_weighted_grid_filter(
+                    self.east, self.north, self.depth, self.power,
+                    cell=float(params.get("pwg_cell", 1.0)),
+                    k=float(params.get("pwg_k", 4.0)),
+                    top_pct=float(params.get("pwg_top_pct", 50.0)),
+                    subset_mask=subset,
+                    progress=make_progress_cb("power-weighted grid", lo, hi),
+                )
+                subset &= mask_pwg
+                applied_labels.append(
+                    f"PW grid (cell={params.get('pwg_cell', 1.0):g}, "
+                    f"k={params.get('pwg_k', 4.0):g}, "
+                    f"top={params.get('pwg_top_pct', 50.0):g}%)"
+                )
+
+            if run_knn:
+                lo, hi = stage_ranges["knn"]
+                self.filter_state.update({"stage": "kNN SOR", "progress": lo})
+                mask_knn = F.knn_sor(
+                    self.east, self.north, self.depth,
+                    k=int(params.get("knn_k", 8)),
+                    m=float(params.get("knn_m", 3.0)),
+                    chunk_size=int(params.get("knn_chunk", 500_000)),
+                    subset_mask=subset,
+                    progress=make_progress_cb("kNN SOR", lo, hi),
+                )
+                subset &= mask_knn
+                applied_labels.append(
+                    f"kNN SOR (k={int(params.get('knn_k', 8))}, "
+                    f"m={float(params.get('knn_m', 3.0)):g})"
+                )
+
+            kept_before = int(self.filter_state.get("kept_before", 0))
+            kept_after = int(subset.sum())
+            removed = max(0, kept_before - kept_after)
+
+            self.replace_mask(subset)
+
+            self.filter_state.update(
+                {
+                    "phase": "done",
+                    "stage": "done",
+                    "progress": 1.0,
+                    "elapsed": time.perf_counter() - t0,
+                    "applied": applied_labels,
+                    "removed": removed,
+                    "kept_after": kept_after,
+                }
+            )
+        except Exception as e:
+            self.filter_state.update(
+                {
+                    "phase": "error",
+                    "stage": "error",
                     "error": str(e),
                     "elapsed": time.perf_counter() - t0,
                 }

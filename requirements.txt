@@ -5,3 +5,4 @@ pandas>=2.2
 pyarrow>=15.0
 datashader>=0.16
 pillow>=10.3
+scipy>=1.13
