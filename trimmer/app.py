@@ -57,6 +57,18 @@ def _status(label: str, removed: int, kept: int) -> str:
     return f"{label}: removed {removed:,}, now keeping {kept:,}"
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Human-friendly duration: '45s', '3m 24s', '1h 12m 5s'."""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
 # --- layout ---------------------------------------------------------------
 
 def build_layout(ds: data_module.Dataset) -> html.Div:
@@ -920,18 +932,19 @@ def register_callbacks(app: Dash) -> None:
             pct = progress * 100.0
             if elapsed > 0.5 and progress > 0.01:
                 eta = elapsed / progress - elapsed
-                eta_s = f", ETA {eta:.0f}s"
+                eta_s = f", ETA {_fmt_duration(eta)}"
             else:
                 eta_s = ""
             msg = (
                 f"exporting {pct:5.1f}%  scanned {rows_p:,}/{rows_t:,},  "
-                f"wrote {rows_w:,},  {elapsed:.1f}s{eta_s}"
+                f"wrote {rows_w:,},  elapsed {_fmt_duration(elapsed)}{eta_s}"
             )
             return msg, False, True
         if phase == "done":
             return (
                 f"wrote {int(s.get('rows_written', 0)):,} / {int(s.get('rows_total', 0)):,} "
-                f"rows to {Path(s.get('out_path') or '').name} in {float(s.get('elapsed', 0.0)):.1f}s",
+                f"rows to {Path(s.get('out_path') or '').name} "
+                f"in {_fmt_duration(float(s.get('elapsed', 0.0)))}",
                 True,
                 False,
             )
