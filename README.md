@@ -5,7 +5,8 @@ Loads a 15-column CSV, auto-prunes positive depths and gross outliers,
 then lets you refine the trim interactively by drawing a compass-heading
 cross-section on a top-down map, inspecting depth and power histograms,
 and lasso-rejecting fliers. Exports a trimmed CSV with the original 15
-columns preserved.
+columns preserved, or a gridded depth surface ready for **QGIS** contour
+extraction (GeoTIFF / Esri ASCII Grid) and **Google Earth** viewing (KMZ).
 
 ![Point Cloud Trimmer in use: a 24.5M-point CSV with auto-filters applied, a 139.5° heading line drawn across the seabed, and the corresponding cross-section in the right pane.](docs/screenshot.png)
 
@@ -89,13 +90,75 @@ Then open <http://127.0.0.1:8050> in a browser. Options:
    accumulate. Use **Undo** to step back through the last ten actions;
    **Reset** returns to the initial post-load mask (positives only
    dropped).
-9. **Export.** Click **Export trimmed CSV**. The export runs on a
-   background thread that streams the original CSV chunk-by-chunk
-   through PyArrow; a live status line ticks once a second with
-   percent complete, rows scanned, rows written, elapsed time, and an
-   ETA. The output is written to `<stem>_trimmed.csv` alongside the
-   source file, with the original 15 columns and row order preserved
-   verbatim.
+9. **Export.** Two kinds of output, both streamed on a background thread
+   with a live status line (percent complete, rows scanned, elapsed,
+   ETA):
+   - **Export trimmed CSV** — streams the original CSV chunk-by-chunk
+     through PyArrow and writes `<stem>_trimmed.csv` alongside the
+     source file, with the original 15 columns and row order preserved
+     verbatim.
+   - **Export DEM** — bins the kept points onto a regular grid and
+     writes a depth surface for GIS tools. See
+     [Exporting for GIS](#exporting-for-gis-qgis-contours--google-earth)
+     below.
+
+## Exporting for GIS (QGIS contours & Google Earth)
+
+The **Export DEM** button (top bar) turns the *kept* points into a
+gridded depth surface. It uses the true projected coordinates in the
+CSV (`easting (UTM m)` / `northing (UTM m)`), which are consistent
+across runs, and auto-detects the CRS from the `coordinate projection`
+column (e.g. `UTM zone 5N` → EPSG:32605). Pick three things, then click
+**Export DEM**:
+
+- **DEM cell (m)** — grid resolution. Smaller = finer but more empty
+  (NoData) cells where coverage is sparse. Match this to your point
+  spacing; for swath data, 0.5–1.0 m is usually a good start.
+- **Aggregation** — the per-cell depth value: `mean` (smoothest),
+  `min` (deepest point in the cell), or `max` (shoalest).
+- **Format** — `GeoTIFF (.tif)`, `ASCII grid (.asc)`, or
+  `KMZ (Google Earth)`.
+
+The output is written next to the source CSV as
+`<stem>_dem_<agg>_<cell>m.<ext>`. The status line and filename always
+echo the exact parameters used.
+
+### QGIS — extract contour lines
+
+Use **GeoTIFF** (recommended: compressed, tiled, with embedded CRS and
+internal overviews so large grids render fast) or **ASCII grid** (plain
+text `.asc` plus a `.prj` sidecar — keep the two together).
+
+1. Drag the `.tif` (or `.asc`) onto the QGIS canvas. It georeferences
+   itself; the GeoTIFF needs no sidecar.
+2. *(Optional, for nicer contours)* Coverage between swath tracks is
+   often sparse, so fill small gaps first:
+   **Raster → Analysis → Fill nodata…** (search distance of a few
+   cells), and optionally **Raster → Analysis → Smooth**.
+3. **Raster → Extraction → Contour…**, choose the DEM, set an interval
+   (e.g. `0.5` or `1.0` m) and an attribute name (e.g. `ELEV`), and
+   **Run**. The result is contour polylines tagged with depth.
+4. Style/label via the layer's **Symbology** / **Labels** tabs.
+
+Depths are negative (below datum); empty cells use NoData `-9999`,
+which QGIS reads automatically and renders transparent.
+
+### Google Earth — view a colorized surface
+
+Use the **KMZ** format. Unlike the GeoTIFF/asc (raw float data, which
+Google Earth cannot render), the KMZ bakes a **viridis depth gradient**
+into a transparent PNG (dark = deep, bright = shallow), reprojects it to
+WGS84, and wraps it as a `<GroundOverlay>`.
+
+1. Export with format **KMZ (Google Earth)**.
+2. Double-click the `.kmz` (Google Earth Pro) or import it in Google
+   Earth Web. It overlays in place, colored by depth.
+
+The color scale is auto-fit to the 2nd–98th percentile of depths (so a
+few outliers don't wash it out); the exact range is noted in the
+overlay's description. Google Earth shows the colored *surface*, not
+contour lines — to get contour lines there, generate them in QGIS (see
+above) and export those vectors to KML.
 
 ## Common multi-beam cleaning approaches
 
@@ -143,11 +206,17 @@ flowchart LR
     Filters[Auto-filters / depth / power / ping] --> Mask
     Mask --> Export["streaming export (background thread)"]
     Export --> OutCSV[(trimmed CSV)]
+    Mask --> DEM["streaming grid (UTM east/north + depth)"]
+    DEM --> OutTif[(GeoTIFF / .asc)]
+    DEM --> OutKmz[(KMZ ground overlay)]
 ```
 
 ## Out of scope
 
-- Reprojection (the CSV already provides planar local meters).
+- Reprojection for the interactive view (it uses the CSV's planar local
+  meters). The DEM/KMZ export does read the CSV's UTM columns and, for
+  KMZ, warps to WGS84 — but the app does no datum/projection
+  transforms of its own beyond that.
 - 3D point-cloud visualization (this tool is 2D map + cross-section).
 - Multi-file sessions or saving/loading filter recipes.
 - Sound-velocity refraction correction and full CUBE/uncertainty
@@ -162,7 +231,8 @@ point-cloud-trimmer/
   README.md
   trimmer/
     __init__.py
-    data.py       # pyarrow load, in-memory state, threaded streaming export
+    data.py       # pyarrow load, in-memory state, threaded streaming CSV + DEM export
+    dem.py        # gridding + GeoTIFF / Esri ASCII Grid / KMZ writers
     filters.py    # pure keep-mask transforms (9 filters + ping spec parser)
     geom.py       # compass heading, along/across, corridor
     views.py      # Plotly figure builders (Datashader top-down, hists, scattergl)

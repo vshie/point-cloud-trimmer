@@ -17,11 +17,19 @@ import numpy as np
 import pyarrow as pa
 from pyarrow import csv as pacsv
 
+from . import dem as dem_module
+
 EASTING_COL = "easting (local m)"
 NORTHING_COL = "northing (local m)"
 DEPTH_COL = "altitude (m)"
 POWER_COL = "power (dB)"
 PING_COL = "ping number"
+
+# Used only by the DEM/contour export, which needs globally-consistent
+# coordinates (the `local m` columns use a per-run origin).
+UTM_EASTING_COL = "easting (UTM m)"
+UTM_NORTHING_COL = "northing (UTM m)"
+PROJECTION_COL = "coordinate projection"
 
 _F32 = pa.float32()
 _I32 = pa.int32()
@@ -92,7 +100,28 @@ class Dataset:
         self.export_state = self._idle_export_state()
         self.filter_lock = threading.Lock()
         self.filter_state = self._idle_filter_state()
+        # Coordinate projection (for the DEM/contour export). Read lazily from
+        # the first data row so load stays cheap; mapped to an EPSG code.
+        self.coordinate_projection = self._read_first_projection()
+        self.epsg = dem_module.parse_utm_epsg(self.coordinate_projection)
         self.load_seconds = time.perf_counter() - t0
+
+    def _read_first_projection(self) -> Optional[str]:
+        """Read the `coordinate projection` value from the first data row."""
+        try:
+            reader = pacsv.open_csv(
+                str(self.csv_path),
+                convert_options=pacsv.ConvertOptions(
+                    include_columns=[PROJECTION_COL],
+                ),
+            )
+            for batch in reader:
+                if batch.num_rows:
+                    val = batch.column(0)[0].as_py()
+                    return str(val) if val is not None else None
+            return None
+        except Exception:
+            return None
 
     @staticmethod
     def _idle_export_state() -> dict:
@@ -276,6 +305,208 @@ class Dataset:
                     "elapsed": time.perf_counter() - t0,
                 }
             )
+
+    # --- DEM / contour export ---------------------------------------------
+
+    def start_dem_export(
+        self,
+        out_path: Path,
+        cell: float,
+        agg: str = "mean",
+        epsg: Optional[int] = None,
+        fmt: str = "asc",
+        chunk_rows: int = 1_000_000,
+    ) -> bool:
+        """Kick off a streaming DEM export (`fmt` in {"asc", "gtiff"}).
+
+        Shares `export_state` with the CSV export (they are mutually
+        exclusive). Returns False if an export is already running.
+        """
+        with self.export_lock:
+            if self.is_exporting():
+                return False
+            self.export_state = {
+                "phase": "running",
+                "progress": 0.0,
+                "rows_processed": 0,
+                "rows_written": 0,
+                "rows_total": self.n,
+                "elapsed": 0.0,
+                "out_path": str(out_path),
+                "message": None,
+                "error": None,
+            }
+        t = threading.Thread(
+            target=self._run_dem_export,
+            args=(Path(out_path), float(cell), str(agg), epsg, str(fmt), int(chunk_rows)),
+            daemon=True,
+            name="omniscan-dem-export",
+        )
+        t.start()
+        return True
+
+    # Refuse grids that would blow past a sane memory budget; the accumulator
+    # holds up to 16 bytes/cell, so ~50M cells is ~0.8 GB.
+    _MAX_DEM_CELLS = 50_000_000
+
+    def _dem_columns(self):
+        return {
+            UTM_EASTING_COL: pa.float64(),
+            UTM_NORTHING_COL: pa.float64(),
+            DEPTH_COL: pa.float32(),
+        }
+
+    def _run_dem_export(
+        self,
+        out_path: Path,
+        cell: float,
+        agg: str,
+        epsg: Optional[int],
+        fmt: str,
+        chunk_rows: int,
+    ) -> None:
+        """Two streaming passes: pass 1 finds the UTM extent, pass 2 bins.
+
+        Peak RAM is one record batch plus the grid accumulator, independent
+        of the source file size.
+        """
+        t0 = time.perf_counter()
+        try:
+            col_types = self._dem_columns()
+            include = list(col_types)
+
+            def _open():
+                return pacsv.open_csv(
+                    str(self.csv_path),
+                    read_options=pacsv.ReadOptions(block_size=chunk_rows * 256),
+                    convert_options=pacsv.ConvertOptions(
+                        include_columns=include,
+                        column_types=col_types,
+                    ),
+                )
+
+            # --- Pass 1: extent over kept, finite points ---------------------
+            x_min = y_min = np.inf
+            x_max = y_max = -np.inf
+            cursor = 0
+            kept_seen = 0
+            reader = _open()
+            for batch in reader:
+                n = batch.num_rows
+                sub = self.keep_mask[cursor : cursor + n]
+                cursor += n
+                if sub.any():
+                    x = batch.column(UTM_EASTING_COL).to_numpy(zero_copy_only=False)[sub]
+                    y = batch.column(UTM_NORTHING_COL).to_numpy(zero_copy_only=False)[sub]
+                    z = batch.column(DEPTH_COL).to_numpy(zero_copy_only=False)[sub]
+                    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+                    if finite.any():
+                        xf, yf = x[finite], y[finite]
+                        x_min = min(x_min, float(xf.min()))
+                        x_max = max(x_max, float(xf.max()))
+                        y_min = min(y_min, float(yf.min()))
+                        y_max = max(y_max, float(yf.max()))
+                        kept_seen += int(finite.sum())
+                self.export_state.update(
+                    {
+                        "progress": 0.45 * (cursor / max(self.n, 1)),
+                        "rows_processed": cursor,
+                        "elapsed": time.perf_counter() - t0,
+                    }
+                )
+
+            if cursor != self.n:
+                raise RuntimeError(
+                    f"Row count mismatch during DEM export: streamed {cursor} "
+                    f"rows but dataset has {self.n}. The source CSV may have "
+                    "changed since load."
+                )
+            if kept_seen == 0 or not np.isfinite(x_min):
+                raise RuntimeError(
+                    "No kept points with valid UTM coordinates to grid."
+                )
+
+            acc = dem_module.GridAccumulator(
+                x_min=x_min, y_min=y_min, x_max=x_max, y_max=y_max,
+                cell=cell, agg=agg,
+            )
+            if acc.ncells > self._MAX_DEM_CELLS:
+                raise RuntimeError(
+                    f"Grid would be {acc.ncols} x {acc.nrows} = {acc.ncells:,} "
+                    f"cells, over the {self._MAX_DEM_CELLS:,}-cell limit. "
+                    f"Increase the cell size (current: {cell:g} m)."
+                )
+
+            # --- Pass 2: accumulate ------------------------------------------
+            cursor = 0
+            reader = _open()
+            for batch in reader:
+                n = batch.num_rows
+                sub = self.keep_mask[cursor : cursor + n]
+                cursor += n
+                if sub.any():
+                    x = batch.column(UTM_EASTING_COL).to_numpy(zero_copy_only=False)[sub]
+                    y = batch.column(UTM_NORTHING_COL).to_numpy(zero_copy_only=False)[sub]
+                    z = batch.column(DEPTH_COL).to_numpy(zero_copy_only=False)[sub]
+                    acc.add(x, y, z)
+                self.export_state.update(
+                    {
+                        "progress": 0.45 + 0.5 * (cursor / max(self.n, 1)),
+                        "rows_processed": cursor,
+                        "elapsed": time.perf_counter() - t0,
+                    }
+                )
+
+            grid = acc.result()
+            self.export_state.update({"progress": 0.97, "elapsed": time.perf_counter() - t0})
+
+            out_path = Path(out_path)
+            if fmt == "gtiff":
+                dem_module.write_geotiff(
+                    out_path, grid, acc.xllcorner, acc.yllcorner, cell, epsg,
+                )
+            elif fmt == "kmz":
+                dem_module.write_kmz(
+                    out_path, grid, acc.xllcorner, acc.yllcorner, cell, epsg,
+                )
+            else:
+                dem_module.write_asc(out_path, grid, acc.xllcorner, acc.yllcorner, cell)
+                dem_module.write_prj(out_path.with_suffix(".prj"), epsg)
+
+            populated = int(getattr(acc, "populated_cells", 0))
+            epsg_txt = f"EPSG:{epsg}" if epsg else "no CRS"
+            kind = {"gtiff": "GeoTIFF", "kmz": "KMZ"}.get(fmt, "ASCII grid")
+            message = (
+                f"wrote {kind} {acc.ncols}x{acc.nrows} ({agg}, {cell:g} m, {epsg_txt}), "
+                f"{populated:,} filled cells -> {out_path.name} "
+                f"in {self._fmt_secs(time.perf_counter() - t0)}"
+            )
+            self.export_state.update(
+                {
+                    "phase": "done",
+                    "progress": 1.0,
+                    "rows_processed": self.n,
+                    "rows_written": populated,
+                    "elapsed": time.perf_counter() - t0,
+                    "message": message,
+                }
+            )
+        except Exception as e:
+            self.export_state.update(
+                {
+                    "phase": "error",
+                    "error": str(e),
+                    "elapsed": time.perf_counter() - t0,
+                }
+            )
+
+    @staticmethod
+    def _fmt_secs(seconds: float) -> str:
+        s = max(0, int(round(seconds)))
+        if s < 60:
+            return f"{s}s"
+        m, s = divmod(s, 60)
+        return f"{m}m {s:02d}s"
 
     # --- Finishing filters (kNN SOR + power-weighted grid median) ---------
 

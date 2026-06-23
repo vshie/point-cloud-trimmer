@@ -23,6 +23,16 @@ from . import views
 from .geom import Heading, corridor, heading_from_line
 
 
+# Shared style for a label+input group that carries a hover tooltip. The
+# `help` cursor hints that an explanation is available on mouseover.
+_TIP_GROUP = {
+    "display": "inline-flex",
+    "alignItems": "center",
+    "gap": "6px",
+    "cursor": "help",
+}
+
+
 # --- helpers --------------------------------------------------------------
 
 def _heading_from_store(payload: Optional[dict]) -> Optional[Heading]:
@@ -125,6 +135,60 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
                             "cursor": "pointer",
                         },
                     ),
+                    html.Span("|", style={"color": "#444"}),
+                    html.Label(
+                        "DEM cell (m):",
+                        title=(
+                            "Grid cell size for the DEM raster. Smaller = finer "
+                            "contours but larger files."
+                        ),
+                    ),
+                    dcc.Input(
+                        id="dem-cell",
+                        type="number",
+                        value=0.5,
+                        step=0.25,
+                        min=0.05,
+                        style={"width": "70px"},
+                    ),
+                    dcc.Dropdown(
+                        id="dem-agg",
+                        options=[
+                            {"label": "mean", "value": "mean"},
+                            {"label": "min (deepest)", "value": "min"},
+                            {"label": "max (shoalest)", "value": "max"},
+                        ],
+                        value="mean",
+                        clearable=False,
+                        style={"width": "150px", "color": "#000"},
+                    ),
+                    dcc.Dropdown(
+                        id="dem-format",
+                        options=[
+                            {"label": "GeoTIFF (.tif)", "value": "gtiff"},
+                            {"label": "ASCII grid (.asc)", "value": "asc"},
+                            {"label": "KMZ (Google Earth)", "value": "kmz"},
+                        ],
+                        value="gtiff",
+                        clearable=False,
+                        style={"width": "180px", "color": "#000"},
+                    ),
+                    html.Button(
+                        "Export DEM",
+                        id="btn-export-dem",
+                        n_clicks=0,
+                        title=(
+                            "Bin kept points onto a UTM grid and write a GeoTIFF "
+                            "or Esri ASCII Grid for QGIS contouring."
+                        ),
+                        style={
+                            "backgroundColor": "#1565c0",
+                            "color": "white",
+                            "border": "none",
+                            "padding": "6px 12px",
+                            "cursor": "pointer",
+                        },
+                    ),
                     html.Span(id="export-status", style={"color": "#9e9", "marginLeft": "6px"}),
                     dcc.Interval(
                         id="export-interval",
@@ -146,37 +210,70 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
                     "flexWrap": "wrap",
                 },
                 children=[
-                    dcc.Checklist(
-                        id="auto-filters",
-                        options=[
-                            {"label": " Percentile clip (0.5/99.5)", "value": "pct"},
-                            {"label": " Global MAD (k=5)", "value": "mad"},
-                            {"label": " Grid MAD (k=4, cell=1 m)", "value": "gridmad"},
-                        ],
-                        value=[],
-                        inline=True,
-                        labelStyle={"marginRight": "12px"},
+                    html.Span(
+                        style={"cursor": "help"},
+                        title=(
+                            "Auto-filters (tick any, then Apply auto-filters):\n"
+                            "- Percentile clip (0.5/99.5): drop the lowest 0.5% and "
+                            "highest 99.5% of depths.\n"
+                            "- Global MAD (k=5): drop depths more than 5 x MAD from the "
+                            "overall median depth.\n"
+                            "- Grid MAD: per-cell version using the grid cell / k inputs "
+                            "to the right (the workhorse for sonar scatter)."
+                        ),
+                        children=dcc.Checklist(
+                            id="auto-filters",
+                            options=[
+                                {"label": " Percentile clip (0.5/99.5)", "value": "pct"},
+                                {"label": " Global MAD (k=5)", "value": "mad"},
+                                {"label": " Grid MAD (k=4, cell=1 m)", "value": "gridmad"},
+                            ],
+                            value=[],
+                            inline=True,
+                            labelStyle={"marginRight": "12px"},
+                        ),
                     ),
                     html.Div(
                         style={"display": "flex", "gap": "6px", "alignItems": "center"},
                         children=[
-                            html.Label("grid cell (m):"),
-                            dcc.Input(
-                                id="grid-cell",
-                                type="number",
-                                value=1.0,
-                                step=0.25,
-                                min=0.1,
-                                style={"width": "70px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "Grid MAD cell size (meters). Points are binned into "
+                                    "square cells of this size and each point is compared "
+                                    "to its own cell's median depth. Smaller cells = more "
+                                    "local outlier detection (used by the Grid MAD filter)."
+                                ),
+                                children=[
+                                    html.Label("grid cell (m):"),
+                                    dcc.Input(
+                                        id="grid-cell",
+                                        type="number",
+                                        value=1.0,
+                                        step=0.25,
+                                        min=0.1,
+                                        style={"width": "70px"},
+                                    ),
+                                ],
                             ),
-                            html.Label("k:"),
-                            dcc.Input(
-                                id="grid-k",
-                                type="number",
-                                value=4.0,
-                                step=0.5,
-                                min=1.0,
-                                style={"width": "60px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "Grid MAD strength (k). A point is dropped if its depth "
+                                    "is more than k x MAD from its cell's median depth. "
+                                    "Lower k removes more points."
+                                ),
+                                children=[
+                                    html.Label("k:"),
+                                    dcc.Input(
+                                        id="grid-k",
+                                        type="number",
+                                        value=4.0,
+                                        step=0.5,
+                                        min=1.0,
+                                        style={"width": "60px"},
+                                    ),
+                                ],
                             ),
                             html.Button(
                                 "Apply auto-filters",
@@ -188,13 +285,23 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
                     html.Div(
                         style={"display": "flex", "gap": "6px", "alignItems": "center"},
                         children=[
-                            html.Label("Reject pings:"),
-                            dcc.Input(
-                                id="ping-reject-spec",
-                                type="text",
-                                placeholder="27346, 27400-27410",
-                                debounce=True,
-                                style={"width": "220px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "Ping numbers or ranges to remove, comma-separated, "
+                                    "e.g. 27346, 27400-27410. Use to drop whole bad pings "
+                                    "(boat turns, GPS dropouts, noisy swaths)."
+                                ),
+                                children=[
+                                    html.Label("Reject pings:"),
+                                    dcc.Input(
+                                        id="ping-reject-spec",
+                                        type="text",
+                                        placeholder="27346, 27400-27410",
+                                        debounce=True,
+                                        style={"width": "220px"},
+                                    ),
+                                ],
                             ),
                             html.Button(
                                 "Apply ping reject",
@@ -217,83 +324,136 @@ def build_layout(ds: data_module.Dataset) -> html.Div:
                     "flexWrap": "wrap",
                 },
                 children=[
-                    dcc.Checklist(
-                        id="finishing-filters",
-                        options=[
-                            {
-                                "label": " Power-weighted grid median",
-                                "value": "pwg",
-                            },
-                            {
-                                "label": " kNN SOR  (slow; finishing step only)",
-                                "value": "knn",
-                            },
-                        ],
-                        value=[],
-                        inline=True,
-                        labelStyle={"marginRight": "12px"},
+                    html.Span(
+                        style={"cursor": "help"},
+                        title=(
+                            "Finishing filters (run AFTER trimming, as a final cleanup):\n"
+                            "- Power-weighted grid median: per-cell robust median that "
+                            "trusts only the strongest returns, then drops depth outliers "
+                            "(uses the PWG cell / k / top % inputs).\n"
+                            "- kNN SOR: removes isolated fliers by nearest-neighbor "
+                            "distance (uses kNN k / m). Slow on large datasets."
+                        ),
+                        children=dcc.Checklist(
+                            id="finishing-filters",
+                            options=[
+                                {
+                                    "label": " Power-weighted grid median",
+                                    "value": "pwg",
+                                },
+                                {
+                                    "label": " kNN SOR  (slow; finishing step only)",
+                                    "value": "knn",
+                                },
+                            ],
+                            value=[],
+                            inline=True,
+                            labelStyle={"marginRight": "12px"},
+                        ),
                     ),
                     html.Div(
                         style={"display": "flex", "gap": "6px", "alignItems": "center"},
-                        title=(
-                            "Power-weighted grid: per-cell MAD using only the strongest "
-                            "returns to set the trusted median."
-                        ),
                         children=[
-                            html.Label("PWG cell (m):"),
-                            dcc.Input(
-                                id="pwg-cell",
-                                type="number",
-                                value=1.0,
-                                step=0.25,
-                                min=0.1,
-                                style={"width": "70px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "Power-weighted grid cell size (meters). Square bin "
+                                    "size used to compute a trusted per-cell median depth "
+                                    "from the strongest returns. Smaller = more local."
+                                ),
+                                children=[
+                                    html.Label("PWG cell (m):"),
+                                    dcc.Input(
+                                        id="pwg-cell",
+                                        type="number",
+                                        value=1.0,
+                                        step=0.25,
+                                        min=0.1,
+                                        style={"width": "70px"},
+                                    ),
+                                ],
                             ),
-                            html.Label("k:"),
-                            dcc.Input(
-                                id="pwg-k",
-                                type="number",
-                                value=4.0,
-                                step=0.5,
-                                min=1.0,
-                                style={"width": "60px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "Power-weighted grid strength (k). Drops points more "
+                                    "than k x MAD from the cell's power-weighted median "
+                                    "depth. Lower k removes more points."
+                                ),
+                                children=[
+                                    html.Label("k:"),
+                                    dcc.Input(
+                                        id="pwg-k",
+                                        type="number",
+                                        value=4.0,
+                                        step=0.5,
+                                        min=1.0,
+                                        style={"width": "60px"},
+                                    ),
+                                ],
                             ),
-                            html.Label("top %:"),
-                            dcc.Input(
-                                id="pwg-top-pct",
-                                type="number",
-                                value=50,
-                                step=5,
-                                min=5,
-                                max=100,
-                                style={"width": "70px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "Use only the strongest top % of returns (by power dB) "
+                                    "within each cell to compute the trusted median depth. "
+                                    "Lower % trusts only the very strongest echoes."
+                                ),
+                                children=[
+                                    html.Label("top %:"),
+                                    dcc.Input(
+                                        id="pwg-top-pct",
+                                        type="number",
+                                        value=50,
+                                        step=5,
+                                        min=5,
+                                        max=100,
+                                        style={"width": "70px"},
+                                    ),
+                                ],
                             ),
                         ],
                     ),
                     html.Div(
                         style={"display": "flex", "gap": "6px", "alignItems": "center"},
-                        title=(
-                            "kNN SOR: drops points whose mean distance to their k "
-                            "nearest neighbors is > mean + m * sigma."
-                        ),
                         children=[
-                            html.Label("kNN k:"),
-                            dcc.Input(
-                                id="knn-k",
-                                type="number",
-                                value=8,
-                                step=1,
-                                min=2,
-                                style={"width": "60px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "kNN SOR neighbor count (k). Number of nearest "
+                                    "neighbors used to measure each point's local density "
+                                    "in the statistical outlier removal."
+                                ),
+                                children=[
+                                    html.Label("kNN k:"),
+                                    dcc.Input(
+                                        id="knn-k",
+                                        type="number",
+                                        value=8,
+                                        step=1,
+                                        min=2,
+                                        style={"width": "60px"},
+                                    ),
+                                ],
                             ),
-                            html.Label("m:"),
-                            dcc.Input(
-                                id="knn-m",
-                                type="number",
-                                value=3.0,
-                                step=0.5,
-                                min=0.5,
-                                style={"width": "60px"},
+                            html.Span(
+                                style=_TIP_GROUP,
+                                title=(
+                                    "kNN SOR strength (m). Drops points whose mean distance "
+                                    "to their k nearest neighbors exceeds mean + m x sigma "
+                                    "across all points. Lower m removes more points."
+                                ),
+                                children=[
+                                    html.Label("m:"),
+                                    dcc.Input(
+                                        id="knn-m",
+                                        type="number",
+                                        value=3.0,
+                                        step=0.5,
+                                        min=0.5,
+                                        style={"width": "60px"},
+                                    ),
+                                ],
                             ),
                         ],
                     ),
@@ -1038,6 +1198,7 @@ def register_callbacks(app: Dash) -> None:
         Output("export-status", "children"),
         Output("export-interval", "disabled"),
         Output("btn-export", "disabled"),
+        Output("btn-export-dem", "disabled"),
         Output("btn-apply-finishing", "disabled", allow_duplicate=True),
         Input("btn-export", "n_clicks"),
         prevent_initial_call=True,
@@ -1049,18 +1210,67 @@ def register_callbacks(app: Dash) -> None:
                 "cannot export: finishing filters are running",
                 True,
                 False,
+                False,
                 True,
             )
         if ds.is_exporting():
-            return "export already in progress", False, True, True
+            return "export already in progress", False, True, True, True
         out = ds.csv_path.with_name(ds.csv_path.stem + "_trimmed.csv")
         ds.start_export(out)
-        return f"starting export -> {out.name} ...", False, True, True
+        return f"starting export -> {out.name} ...", False, True, True, True
 
     @app.callback(
         Output("export-status", "children", allow_duplicate=True),
         Output("export-interval", "disabled", allow_duplicate=True),
         Output("btn-export", "disabled", allow_duplicate=True),
+        Output("btn-export-dem", "disabled", allow_duplicate=True),
+        Output("btn-apply-finishing", "disabled", allow_duplicate=True),
+        Input("btn-export-dem", "n_clicks"),
+        State("dem-cell", "value"),
+        State("dem-agg", "value"),
+        State("dem-format", "value"),
+        prevent_initial_call=True,
+    )
+    def _start_dem_export(_n, cell, agg, fmt):
+        ds = data_module.get()
+        if ds.is_filtering():
+            return (
+                "cannot export: finishing filters are running",
+                True,
+                False,
+                False,
+                True,
+            )
+        if ds.is_exporting():
+            return "export already in progress", False, True, True, True
+        try:
+            cell_v = float(cell or 0.5)
+        except (TypeError, ValueError):
+            cell_v = 0.5
+        if cell_v <= 0:
+            cell_v = 0.5
+        agg_v = str(agg or "mean")
+        fmt_v = str(fmt) if str(fmt) in ("gtiff", "asc", "kmz") else "asc"
+        ext = {"gtiff": "tif", "kmz": "kmz"}.get(fmt_v, "asc")
+        epsg = ds.epsg or 32605
+        out = ds.csv_path.with_name(
+            f"{ds.csv_path.stem}_dem_{agg_v}_{cell_v:g}m.{ext}"
+        )
+        ds.start_dem_export(out, cell_v, agg_v, epsg, fmt_v)
+        kind = {"gtiff": "GeoTIFF", "kmz": "KMZ"}.get(fmt_v, "ASCII grid")
+        return (
+            f"starting DEM export ({kind}, {agg_v}, {cell_v:g} m, EPSG:{epsg}) -> {out.name} ...",
+            False,
+            True,
+            True,
+            True,
+        )
+
+    @app.callback(
+        Output("export-status", "children", allow_duplicate=True),
+        Output("export-interval", "disabled", allow_duplicate=True),
+        Output("btn-export", "disabled", allow_duplicate=True),
+        Output("btn-export-dem", "disabled", allow_duplicate=True),
         Output("btn-apply-finishing", "disabled", allow_duplicate=True),
         Input("export-interval", "n_intervals"),
         prevent_initial_call=True,
@@ -1085,30 +1295,30 @@ def register_callbacks(app: Dash) -> None:
                 f"exporting {pct:5.1f}%  scanned {rows_p:,}/{rows_t:,},  "
                 f"wrote {rows_w:,},  elapsed {_fmt_duration(elapsed)}{eta_s}"
             )
-            return msg, False, True, True
+            return msg, False, True, True, True
         if phase == "done":
-            return (
+            done_msg = s.get("message") or (
                 f"wrote {int(s.get('rows_written', 0)):,} / {int(s.get('rows_total', 0)):,} "
                 f"rows to {Path(s.get('out_path') or '').name} "
-                f"in {_fmt_duration(float(s.get('elapsed', 0.0)))}",
-                True,
-                False,
-                False,
+                f"in {_fmt_duration(float(s.get('elapsed', 0.0)))}"
             )
+            return done_msg, True, False, False, False
         if phase == "error":
             return (
                 f"export failed: {s.get('error', 'unknown error')}",
                 True,
                 False,
                 False,
+                False,
             )
-        return no_update, True, False, False
+        return no_update, True, False, False, False
 
     @app.callback(
         Output("finishing-status", "children"),
         Output("filter-interval", "disabled"),
         Output("btn-apply-finishing", "disabled"),
         Output("btn-export", "disabled", allow_duplicate=True),
+        Output("btn-export-dem", "disabled", allow_duplicate=True),
         Output("last-action", "children", allow_duplicate=True),
         Input("btn-apply-finishing", "n_clicks"),
         State("finishing-filters", "value"),
@@ -1127,6 +1337,7 @@ def register_callbacks(app: Dash) -> None:
                 True,
                 False,
                 False,
+                False,
                 "finishing: no checkboxes selected",
             )
         if ds.is_exporting():
@@ -1135,12 +1346,14 @@ def register_callbacks(app: Dash) -> None:
                 True,
                 False,
                 True,
+                True,
                 no_update,
             )
         if ds.is_filtering():
             return (
                 "finishing filters already running",
                 False,
+                True,
                 True,
                 True,
                 no_update,
@@ -1162,12 +1375,14 @@ def register_callbacks(app: Dash) -> None:
                 False,
                 True,
                 True,
+                True,
                 no_update,
             )
         label = ", ".join(c for c in ("pwg", "knn") if c in choices)
         return (
             f"starting finishing filters [{label}] ...",
             False,
+            True,
             True,
             True,
             f"finishing [{label}]: started",
@@ -1178,6 +1393,7 @@ def register_callbacks(app: Dash) -> None:
         Output("filter-interval", "disabled", allow_duplicate=True),
         Output("btn-apply-finishing", "disabled", allow_duplicate=True),
         Output("btn-export", "disabled", allow_duplicate=True),
+        Output("btn-export-dem", "disabled", allow_duplicate=True),
         Output("mask-version", "data", allow_duplicate=True),
         Output("last-action", "children", allow_duplicate=True),
         Input("filter-interval", "n_intervals"),
@@ -1203,7 +1419,7 @@ def register_callbacks(app: Dash) -> None:
                 f"finishing: {stage}  {pct:5.1f}%  "
                 f"elapsed {_fmt_duration(elapsed)}{eta_s}"
             )
-            return msg, False, True, True, no_update, no_update
+            return msg, False, True, True, True, no_update, no_update
         if phase == "done":
             removed = int(s.get("removed", 0))
             kept_after = int(s.get("kept_after", 0))
@@ -1218,6 +1434,7 @@ def register_callbacks(app: Dash) -> None:
                 True,
                 False,
                 False,
+                False,
                 (version or 0) + 1,
                 msg,
             )
@@ -1228,10 +1445,11 @@ def register_callbacks(app: Dash) -> None:
                 True,
                 False,
                 False,
+                False,
                 no_update,
                 f"finishing failed: {err}",
             )
-        return no_update, True, False, False, no_update, no_update
+        return no_update, True, False, False, False, no_update, no_update
 
 
 # --- entry point ----------------------------------------------------------
